@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Base UltraWeather | On‑Chain Oracle</title>
+    <script src="https://cdn.jsdelivr.net/npm/ethers@6.13.2/dist/ethers.umd.min.js"></script>
+    <style>
+        *{margin:0;padding:0;box-sizing:border-box}
+        body{background:linear-gradient(135deg,#0a0f1c,#16212e);font-family:system-ui,sans-serif;min-height:100vh;display:flex;justify-content:center;align-items:center;padding:20px}
+        .card{max-width:520px;width:100%;background:rgba(18,26,36,0.9);backdrop-filter:blur(12px);border-radius:2rem;padding:2rem;border:1px solid rgba(255,255,255,0.1);box-shadow:0 20px 30px -10px rgba(0,0,0,0.4)}
+        h1{font-size:1.7rem;text-align:center;background:linear-gradient(135deg,#fff,#7bc5ff);-webkit-background-clip:text;background-clip:text;color:transparent}
+        .sub{text-align:center;color:#8da3c0;font-size:0.75rem;margin-bottom:1.5rem}
+        .wallet-card{background:#0f1620;border-radius:1.5rem;padding:1rem;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:1.5rem}
+        button{background:#2c6280;border:none;padding:0.6rem 1.2rem;border-radius:2rem;font-weight:600;color:white;cursor:pointer;transition:0.2s}
+        button:hover{background:#3e7b9e;transform:scale(0.97)}
+        .weather-panel{background:#0b1018;border-radius:1.5rem;padding:1.5rem;text-align:center;margin:1rem 0}
+        .temp{font-size:3rem;font-weight:800;color:#ffdfa5}
+        .city{font-size:1.6rem;font-weight:500}
+        .condition{color:#bbd4ff;margin-top:6px}
+        .timestamp{font-size:0.7rem;color:#6c86a3;margin-top:10px}
+        .owner-zone{background:#10161f;border-radius:1.2rem;padding:1rem;margin-top:1.2rem}
+        .btn-group{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-bottom:12px}
+        .btn-primary{background:#0f7b6e}
+        .logo-download{background:#3a2c5c;margin-top:18px;width:100%}
+        .error{color:#ffaa99;font-size:0.8rem;text-align:center;margin-top:12px}
+        hr{margin:16px 0;border-color:#2a3a4a}
+        footer{font-size:0.7rem;text-align:center;color:#5f738e;margin-top:20px}
+    </style>
+</head>
+<body>
+<div class="card" id="app">
+    <h1>⛅ Base UltraWeather</h1>
+    <div class="sub">⚡ Gas‑optimised · Every update = Base Tx</div>
+
+    <div class="wallet-card">
+        <button id="connectBtn">🔌 Connect Wallet</button>
+        <div id="walletAddr" class="timestamp">Not connected</div>
+    </div>
+
+    <div class="weather-panel">
+        <div class="temp" id="tempDisplay">-- °C</div>
+        <div class="city" id="cityDisplay">--</div>
+        <div class="condition" id="condDisplay">--</div>
+        <div class="timestamp" id="lastUpdate">⏱️ last update: --</div>
+    </div>
+
+    <div id="ownerOnly" style="display: none;">
+        <div class="owner-zone">
+            <div class="btn-group">
+                <button id="fetchWeatherBtn" class="btn-primary">🌍 Get my city & weather</button>
+                <button id="pushTxBtn" class="btn-primary">📡 Push to Base blockchain</button>
+            </div>
+            <div id="txStatus" class="error"></div>
+        </div>
+    </div>
+
+    <button id="downloadLogoBtn" class="logo-download">🖼️ Download Logo for DappRadar (250×250 PNG)</button>
+    <hr>
+    <footer>✅ Owner: 0x9BbE3...89Bac | Every weather update is an on‑chain Base transaction.<br>🌦️ Powered by OpenWeatherMap</footer>
+</div>
+
+<script>
+    // ---------- CONFIG (REPLACE AFTER DEPLOY) ----------
+    const CONTRACT_ADDR = "0x___________";   // <-- paste your deployed contract address
+    const ABI = [
+        "function updateWeather(string calldata _city, int16 _temperature, uint8 _condition) external",
+        "function getWeather() external view returns (string city, int16 temperature, uint8 condition, uint32 timestamp)",
+        "function owner() view returns (address)"
+    ];
+    const OPENWEATHER_API_KEY = "YOUR_API_KEY";  // get from openweathermap.org
+
+    // Condition mapping (off-chain)
+    const condMap = ["☀️ Clear", "☁️ Clouds", "🌧️ Rain", "❄️ Snow", "🌫️ Mist", "🌩️ Thunderstorm", "🌙 Night", "🍃 Windy"];
+
+    let signer, contract, userAddr, isOwner = false;
+    let lastFetched = null; // { city, temperatureInt16, conditionIndex }
+
+    // ----- helper: fetch weather from live location
+    async function fetchLiveWeather() {
+        return new Promise((resolve, reject) => {
+            if (!navigator.geolocation) reject(new Error("No geolocation"));
+            navigator.geolocation.getCurrentPosition(async (pos) => {
+                const { latitude, longitude } = pos.coords;
+                const url = `https://api.openweathermap.org/data/2.5/weather?lat=${latitude}&lon=${longitude}&units=metric&appid=${OPENWEATHER_API_KEY}`;
+                const res = await fetch(url);
+                if (!res.ok) reject(new Error("Weather API error"));
+                const data = await res.json();
+                let conditionIndex = 0;
+                const main = data.weather[0].main;
+                if (main === "Clear") conditionIndex = 0;
+                else if (main === "Clouds") conditionIndex = 1;
+                else if (main === "Rain") conditionIndex = 2;
+                else if (main === "Snow") conditionIndex = 3;
+                else if (main === "Mist" || main === "Fog") conditionIndex = 4;
+                else if (main === "Thunderstorm") conditionIndex = 5;
+                else conditionIndex = 0;
+                resolve({
+                    city: data.name,
+                    temperature: Math.round(data.main.temp * 10), // int16
+                    conditionIndex
+                });
+            }, reject, { timeout: 10000 });
+        });
+    }
+
+    async function loadContractWeather() {
+        if (!contract) return;
+        try {
+            const [city, temp, condIdx, ts] = await contract.getWeather();
+            if (city && city !== "") {
+                document.getElementById("tempDisplay").innerHTML = (temp / 10).toFixed(1) + " °C";
+                document.getElementById("cityDisplay").innerHTML = city;
+                document.getElementById("condDisplay").innerHTML = condMap[condIdx] || "?";
+                const date = new Date(Number(ts) * 1000);
+                document.getElementById("lastUpdate").innerHTML = `⏱️ last update: ${date.toLocaleString()}`;
+            } else {
+                document.getElementById("lastUpdate").innerHTML = "⏱️ No weather stored yet";
+            }
+        } catch(e) { console.warn(e); }
+    }
+
+    async function connectAndSetup() {
+        if (!window.ethereum) return alert("Install MetaMask or WalletConnect");
+        const provider = new ethers.BrowserProvider(window.ethereum);
+        await provider.send("eth_requestAccounts", []);
+        signer = await provider.getSigner();
+        userAddr = await signer.getAddress();
+        document.getElementById("walletAddr").innerHTML = userAddr.slice(0,6)+"..."+userAddr.slice(-4);
+
+        // switch to Base Mainnet (chainId 8453)
+        try {
+            await window.ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: "0x2105" }] });
+        } catch(e) {
+            if (e.code === 4902) {
+                await window.ethereum.request({ method: "wallet_addEthereumChain", params: [{
+                    chainId: "0x2105", chainName: "Base Mainnet", nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 },
+                    rpcUrls: ["https://mainnet.base.org"], blockExplorerUrls: ["https://basescan.org"]
+                }]});
+            } else throw e;
+        }
+
+        contract = new ethers.Contract(CONTRACT_ADDR, ABI, signer);
+        const ownerAddr = await contract.owner();
+        isOwner = (ownerAddr.toLowerCase() === userAddr.toLowerCase());
+        if (isOwner) {
+            document.getElementById("ownerOnly").style.display = "block";
+            document.getElementById("txStatus").innerHTML = "👑 Owner mode – you can push weather updates.";
+        } else {
+            document.getElementById("ownerOnly").style.display = "none";
+        }
+        await loadContractWeather();
+    }
+
+    async function handleFetchWeather() {
+        if (!isOwner) return;
+        try {
+            document.getElementById("txStatus").innerHTML = "📍 Locating & fetching weather...";
+            const weather = await fetchLiveWeather();
+            lastFetched = weather;
+            // preview
+            document.getElementById("tempDisplay").innerHTML = (weather.temperature / 10).toFixed(1) + " °C";
+            document.getElementById("cityDisplay").innerHTML = weather.city;
+            document.getElementById("condDisplay").innerHTML = condMap[weather.conditionIndex];
+            document.getElementById("txStatus").innerHTML = "✅ Weather ready. Click 'Push to Base' to store on‑chain.";
+        } catch(err) {
+            document.getElementById("txStatus").innerHTML = "❌ " + err.message;
+        }
+    }
+
+    async function pushToChain() {
+        if (!isOwner || !lastFetched) {
+            document.getElementById("txStatus").innerHTML = "❌ Fetch weather first, or connect as owner.";
+            return;
+        }
+        try {
+            document.getElementById("txStatus").innerHTML = "⏳ Sending Base transaction... (gas ~0.0001 ETH)";
+            const tx = await contract.updateWeather(lastFetched.city, lastFetched.temperature, lastFetched.conditionIndex);
+            await tx.wait();
+            document.getElementById("txStatus").innerHTML = "✅ Weather updated on Base blockchain! Transaction hash: " + tx.hash.slice(0,10)+"...";
+            await loadContractWeather();
+        } catch(err) {
+            document.getElementById("txStatus").innerHTML = "❌ Tx failed: " + (err.reason || err.message);
+        }
+    }
+
+    // ----- LOGO GENERATOR (250x250 PNG, ready for DappRadar) -----
+    function generateLogoAndDownload() {
+        const canvas = document.createElement("canvas");
+        canvas.width = 250;
+        canvas.height = 250;
+        const ctx = canvas.getContext("2d");
+        // background gradient
+        const grad = ctx.createLinearGradient(0, 0, 250, 250);
+        grad.addColorStop(0, "#0b1120");
+        grad.addColorStop(1, "#1a2a3a");
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, 250, 250);
+        // draw sun
+        ctx.beginPath();
+        ctx.arc(125, 100, 35, 0, Math.PI * 2);
+        ctx.fillStyle = "#FFD966";
+        ctx.fill();
+        // draw cloud
+        ctx.fillStyle = "#FFFFFF";
+        ctx.beginPath();
+        ctx.ellipse(90, 110, 25, 20, 0, 0, Math.PI * 2);
+        ctx.ellipse(120, 100, 30, 28, 0, 0, Math.PI * 2);
+        ctx.ellipse(150, 110, 25, 22, 0, 0, Math.PI * 2);
+        ctx.fill();
+        // blockchain hexagon
+        ctx.beginPath();
+        ctx.moveTo(185, 170);
+        ctx.lineTo(195, 177);
+        ctx.lineTo(195, 190);
+        ctx.lineTo(185, 197);
+        ctx.lineTo(175, 190);
+        ctx.lineTo(175, 177);
+        ctx.fillStyle = "#5F7EF2";
+        ctx.fill();
+        // text
+        ctx.font = "bold 20px 'Segoe UI'";
+        ctx.fillStyle = "#EFF7FF";
+        ctx.fillText("Base", 70, 220);
+        ctx.font = "bold 16px 'Segoe UI'";
+        ctx.fillStyle = "#AAD0FF";
+        ctx.fillText("Weather", 78, 245);
+
+        // download link
+        const link = document.createElement("a");
+        link.download = "dappradar-logo-base-weather.png";
+        link.href = canvas.toDataURL("image/png");
+        link.click();
+    }
+
+    // bind events
+    document.getElementById("connectBtn").addEventListener("click", connectAndSetup);
+    if (document.getElementById("fetchWeatherBtn")) {
+        document.getElementById("fetchWeatherBtn").addEventListener("click", handleFetchWeather);
+        document.getElementById("pushTxBtn").addEventListener("click", pushToChain);
+    }
+    document.getElementById("downloadLogoBtn").addEventListener("click", generateLogoAndDownload);
+</script>
+</body>
+</html>
